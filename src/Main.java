@@ -1,12 +1,14 @@
 package analyzer;
 
-import java.io.FileReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.*;
 
 public class Main {
     static final String UNKNOWN_FILE_TYPE = "Unknown file type";
     static final String KMP = "--KMP";
+    static final int POOL_CAPACITY = 10;
+    static final String DELIMITER = ";";
 
     interface SearchInFile {
         boolean search(String pattern, String fileName) throws IOException;
@@ -17,7 +19,10 @@ public class Main {
         @Override
         public boolean search(String pattern, String fileName) throws IOException {
             byte[] patternArr = pattern.getBytes();
+            boolean isPdf = false;
+
             try (InputStreamReader r = new FileReader(fileName)) {
+                int b;
                 char[] content = new char[BUFFER_SIZE];
                 while (r.read(content) != -1) {
                     for (int i = 0; i < content.length - patternArr.length + 1; i++) {
@@ -90,38 +95,74 @@ public class Main {
         }
     }
 
-    static class SearchApplier {
+    public static class SearchApplier implements Callable<String>{
         SearchInFile algorithm;
+        File file;
+        File extensions;
 
-        public void setAlgorithm(SearchInFile algorithm) {
+        SearchApplier(SearchInFile algorithm, File file, File extensions) {
             this.algorithm = algorithm;
+            this.file = file;
+            this.extensions = extensions;
         }
 
-        public boolean apply(String pattern, String fileName) throws IOException{
-            return this.algorithm.search(pattern, fileName);
+        @Override
+        public String call() {
+            int extPriority = -1;
+            String fileExtension = "";
+            try {
+                try (BufferedReader reader = new BufferedReader(new FileReader(extensions))) {
+                    String line;
+                    while (Objects.nonNull(line = reader.readLine())) {
+                        String[] extParams = line.split(DELIMITER);
+                        int curExtPriority = Integer.parseInt(extParams[0]);
+                        String curPattern = extParams[1].replaceAll("\"", "");
+                        String curExtension = extParams[2].replaceAll("\"", "");
+                        if (algorithm.search(curPattern, file.getAbsolutePath())) {
+                            if (extPriority < curExtPriority) {
+                                extPriority = curExtPriority;
+                                fileExtension = curExtension;
+                            }
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            if (extPriority == -1) {
+                return file.getName() + ": " + UNKNOWN_FILE_TYPE;
+            } else {
+                return file.getName() + ": " + fileExtension;
+            }
         }
     }
+    public static void main(String[] args) throws InterruptedException, ExecutionException {
+        String rootDirName = args[0];
+        String patternsFileName = args[1];
 
-    public static void main(String[] args) throws IOException {
-        String algorithm = args[0];
-        String fileName = args[1];
-        String pattern = args[2];
-        String fileExtension = args[3];
-
-        SearchInFile searchAlgo;
-        if (KMP.equalsIgnoreCase(algorithm)) {
-            searchAlgo = new KMPSearchInFile();
-        } else {
-            searchAlgo = new NaiveSearchInFile();
+        SearchInFile searchAlgo = new KMPSearchInFile();
+        ExecutorService executor = Executors.newFixedThreadPool(POOL_CAPACITY);
+        List<Callable<String>> threads = new ArrayList<>();
+        File root = new File(rootDirName);
+        File extensions = new File(patternsFileName);
+        Deque<File> deque = new ArrayDeque<>();
+        deque.add(root);
+        while (!deque.isEmpty()) {
+            File cur = deque.poll();
+            File[] children = cur.listFiles();
+            if (children == null) {
+                threads.add(new SearchApplier(searchAlgo, cur, extensions));
+            } else {
+                for (File child : children) {
+                    deque.add(child);
+                }
+            }
         }
-        SearchApplier searchApplier = new SearchApplier();
-        searchApplier.setAlgorithm(searchAlgo);
-        long start = System.nanoTime();
-        if (searchApplier.apply(pattern, fileName)) {
-            System.out.println(fileExtension);
-        } else {
-            System.out.println(UNKNOWN_FILE_TYPE);
+        List<Future<String>> lst = executor.invokeAll(threads);
+        for (Future<String> answer : lst) {
+            System.out.println(answer.get());
         }
-        System.out.printf("It took %f.3 seconds", (System.nanoTime() - start) / Math.pow(10, 9));
+        executor.shutdown();
+        executor.awaitTermination(5000L, TimeUnit.MILLISECONDS);
     }
 }
